@@ -4,9 +4,14 @@
 #include <ctype.h>
 #include <stdio.h>
 
-#define CHAR_PENALTY (1)
+#define CONSECUTIVE_CHAR_PENALTY (7)
+#define BOUNDARY_PENALTY (5)
+#define SUB_WORD_PENALTY (3)
+#define WORD_PENALTY (1)
+
+#define SKIPED_SUBWORD_WORD_PENALTY (3)
 #define SKIPED_WORD_PENALTY (5)
-#define WORD_START_PENALTY (3)
+
 
 struct input {
   const char *pattern;
@@ -14,106 +19,154 @@ struct input {
   const char *string;
   size_t string_len;
   bool first;
+  bool debug;
 };
 
-static bool check_word_start(char prev, char curr)
+enum position_kind {
+  MIDDLE,
+  BOUNDARY,
+  SUB_WORD_START,
+  WORD_START
+};
+
+static const char *position_str[] = {"MIDDLE", "BOUNDARY", "SUB_WORD_START",
+                                     "WORD_START"};
+
+static const int skipped_penalty[] = {0, 0, SKIPED_SUBWORD_WORD_PENALTY,
+                                      SKIPED_WORD_PENALTY};
+static const int char_penalty[] = {0, BOUNDARY_PENALTY, SUB_WORD_PENALTY,
+                                   WORD_PENALTY};
+
+static enum position_kind classify_possition(const struct input *input, size_t i)
 {
-  return (isupper(curr) && !isupper(prev)) ||
-         (isalpha(curr) && !isalpha(prev)) ||
-         (isdigit(curr) && !isdigit(prev)) ||
-         (ispunct(curr) && curr != '-' && curr != '-');
+  if (i == 0)
+    return WORD_START;
+  const char curr = input->string[i];
+  const char prev = input->string[i-1];
+  const bool prev_digit = isdigit(prev);
+  const bool prev_alpha = isalpha(prev);
+
+  if (isalpha(curr)) {
+    const bool after_subword_sep = (prev_digit || prev == '-' || prev == '_');
+
+    if (!prev_alpha && !after_subword_sep)
+      return WORD_START;
+    if (after_subword_sep || (isupper(curr) && islower(prev)))
+      return SUB_WORD_START;
+    return MIDDLE;
+  }
+  if ((isdigit(curr) && !prev_digit) || ispunct(curr))
+    return BOUNDARY;
+  return MIDDLE;
 }
+
+static int min(int x, int y)
+{
+  return x < y ? x : y;
+}
+
+#define DEBUG(fmt, ...)                                                        \
+  do {                                                                         \
+    if (input->debug)                                                          \
+      fprintf(stderr, fmt "\n", ##__VA_ARGS__);                                \
+  } while (0)
+
+#define DEBUG_INDENT(fmt, ...)                                                 \
+  DEBUG("%*s[p%03zu] " fmt, (int)pattern_offset, "", pattern_offset,           \
+        ##__VA_ARGS__)
 
 static int helper(const struct input *input, size_t pattern_offset,
            size_t string_offset) {
   int best = INT_MAX;
-  int skipped_words = 0;
-  int score;
+  enum position_kind skipped_position = MIDDLE;
 
   if (pattern_offset == input->pattern_len)
+  {
+    DEBUG_INDENT("End of pattern and string");
     return 0;
+  }
   if (string_offset == input->string_len)
+  {
+    DEBUG_INDENT("End of string but not pattern");
     return INT_MAX;
-  /* fprintf(stderr, "matching '%s' in '%s' (pattern_offset=%zu string_offset=%zu)\n",  input->pattern + pattern_offset, input->string + string_offset, */
-  /*         pattern_offset, string_offset); */
+  }
+  DEBUG_INDENT("matching '%s' in '%s' (pattern_offset=%zu string_offset=%zu)",
+        input->pattern + pattern_offset, input->string + string_offset,
+        pattern_offset, string_offset);
 
   for (size_t i = string_offset; i < input->string_len; ++i) {
+    /* TODO: check case */
     int char_matches = tolower(input->pattern[pattern_offset]) == tolower(*(input->string + i));
-    int word_start =
-        i == 0 || check_word_start(input->string[i - 1], input->string[i]);
-    /* fprintf(stderr, "i=%zu char_matches=%d word_start=%d\n", i, char_matches, word_start); */
-    if (i == string_offset) {
-      if (!char_matches)
-        continue;
-      score = helper(input, pattern_offset + 1, string_offset + 1);
-      if (score != INT_MAX && input->first)
-        return score;
-      best = score;
-    }
-    if (!word_start)
-      continue;
+    enum position_kind position = classify_possition(input, i);
+    int penalty = 0;
+
+    /* check for skipped */
     if (!char_matches) {
-      if (pattern_offset != 0)
-        ++skipped_words;
+      if (pattern_offset != 0 && position > skipped_position) {
+        if (skipped_penalty[position] > 0)
+          DEBUG_INDENT("skipped position %s (penalty %d)",
+                       position_str[position], skipped_penalty[position]);
+        skipped_position = position;
+      }
       continue;
     }
-    score = helper(input, pattern_offset + 1, i + 1);
+
+    /* recursive */
+    if (position >= BOUNDARY) {
+      DEBUG_INDENT("%s char i=%zu (penalty %d)", position_str[position], i,
+                   char_penalty[position]);
+      penalty = char_penalty[position];
+      if (skipped_position >= position)
+        penalty += skipped_penalty[skipped_position];
+    } else if (i == string_offset) {
+      DEBUG_INDENT("Consecutive char i=%zu (penalty %d)", i, CONSECUTIVE_CHAR_PENALTY);
+      penalty = CONSECUTIVE_CHAR_PENALTY;
+    } else {
+      continue;
+    }
+
+    int score = helper(input, pattern_offset + 1, i + 1);
     if (score == INT_MAX)
       continue;
     if (input->first)
       return score;
-    int new =
-        skipped_words * SKIPED_WORD_PENALTY + WORD_START_PENALTY + score;
-    if (new < best)
-      best = new;
+    score += penalty;
+    best = min(best, score);
+    DEBUG_INDENT("score: %d, best: %d", score, best);
   }
-  /* fprintf(stderr, "'%s' in '%s' -> %d\n", input->pattern + pattern_offset, input->string + string_offset, best); */
-  return (best == INT_MAX) ? INT_MAX : (best + CHAR_PENALTY);
+
+  DEBUG_INDENT("return best score %d", best);
+  return best;
 }
 
+int rank(const char *pattern, const char *string, int first, int debug) {
+  struct input input_struct = {.pattern = pattern,
+                               .pattern_len = strlen(pattern),
+                               .string = string,
+                               .string_len = strlen(string),
+                               .first = first,
+                               .debug = debug};
+  const struct input *input = &input_struct;
+  DEBUG("========================================================================");
+  DEBUG("match pattern '%s' against string '%s'", pattern, string);
 
-
-bool match(const char *pattern, const char *string) {
-  struct input input = {.pattern = pattern,
-                        .pattern_len = strlen(pattern),
-                        .string = string,
-                        .string_len = strlen(string),
-                        .first = false};
-  int score = helper(&input, 0, 0);
-  return score != INT_MAX;
-}
-
-int rank(const char *pattern, const char *string) {
-  struct input input = {.pattern = pattern,
-                        .pattern_len = strlen(pattern),
-                        .string = string,
-                        .string_len = strlen(string),
-                        .first = true};
-  int score = helper(&input, 0, 0);
+  int score = helper(input, 0, 0);
   return (score == INT_MAX) ? -1 : score;
-}
-
-static PyObject *py_match(PyObject *self, PyObject *args) {
-  const char *pattern;
-  const char *string;
-
-  if (!PyArg_ParseTuple(args, "ss", &pattern, &string))
-    return NULL;
-  return PyBool_FromLong(match(pattern, string));
 }
 
 static PyObject *py_rank(PyObject *self, PyObject *args) {
   const char *pattern;
   const char *string;
+  int first;
+  int debug;
 
-  if (!PyArg_ParseTuple(args, "ss", &pattern, &string))
+  if (!PyArg_ParseTuple(args, "sspp", &pattern, &string, &first, &debug))
     return NULL;
-  return PyLong_FromLong(rank(pattern, string));
+  return PyLong_FromLong(rank(pattern, string, first, debug));
 }
 
 
 static PyMethodDef module_methods[] = {
-    {"match", py_match, METH_VARARGS, "Match."},
     {"rank", py_rank, METH_VARARGS, "Rank."},
     {NULL, NULL, 0, NULL} /* Sentinel */
 };

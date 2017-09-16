@@ -9,7 +9,7 @@ from denite.util import globruntime, error, convert2fuzzy_pattern
 import sys
 import os
 import os.path
-from abbrev_matcher_c import match
+from abbrev_matcher import match
 
 class Filter(Base):
 

@@ -92,7 +92,12 @@ def rank(pattern, string, ispath=False, debug=False):
         return score * (len(string) ** 0.05)
     if ispath:
         # big bonus for matches entirely in filenames
-        score = rank(pattern, os.path.split(string)[1])
+        filename = os.path.split(string)[1]
+        basename = os.path.splitext(filename)[0]
+        score = rank(pattern, basename)
+        if score is not None:
+            return normalize(score) / 20
+        score = rank(pattern, filename)
         if score is not None:
             return normalize(score) / 10
     score = rank_c(pattern, string, False, debug)
